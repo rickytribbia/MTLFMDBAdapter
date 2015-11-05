@@ -8,8 +8,8 @@
 
 #import <objc/runtime.h>
 #import <Mantle/Mantle.h>
-#import <Mantle/EXTRuntimeExtensions.h>
-#import <Mantle/EXTScope.h>
+#import <Mantle/MTLEXTRuntimeExtensions.h>
+#import <Mantle/MTLEXTScope.h>
 #import <Mantle/MTLReflection.h>
 #import <FMDB/FMDB.h>
 #import "MTLFMDBAdapter.h"
@@ -23,6 +23,59 @@ const NSInteger MTLFMDBAdapterErrorExceptionThrown = 1;
 
 // Associated with the NSException that was caught.
 static NSString * const MTLFMDBAdapterThrownExceptionErrorKey = @"MTLFMDBAdapterThrownException";
+
+
+@implementation MTLModel (MTLFMDBExtensions)
+
+- (NSInteger) mtlfmdb_rowid
+{
+    return [objc_getAssociatedObject(self, MTLFMDBRowIdKey) integerValue];
+}
+
+- (void) setMtlfmdb_rowid:(NSInteger)mtlfmdb_rowid
+{
+    objc_setAssociatedObject(self, MTLFMDBRowIdKey, @(mtlfmdb_rowid), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
++ (void) allObjectsFromDB:(FMDatabase *)db withCompletion:(void(^)(NSArray *objects, FMDatabase *db))completionBlock
+{
+    if([self conformsToProtocol:@protocol(MTLFMDBSerializing)]){
+        MTLModel<MTLFMDBSerializing> *model = (MTLModel<MTLFMDBSerializing> *)self;
+        FMResultSet *resultSet = [db executeQuery:[NSString stringWithFormat:@"SELECT * FROM %@",[model.class FMDBTableName]]];
+        
+        if (resultSet != nil) {
+            NSMutableArray *result = [[NSMutableArray alloc] init];
+            while ([resultSet next]) {
+                MTLModel<MTLFMDBSerializing> *object = [[self alloc] init];
+                [object loadFromResultSet:resultSet];
+            }
+            [resultSet close];
+            completionBlock([result copy],db);
+        }else{
+            completionBlock(nil,db);
+        }
+    }else{
+        completionBlock(nil,db);
+    }
+}
+
+- (NSString *)saveStatement
+{
+    return (self.mtlfmdb_rowid > 0) ? [MTLFMDBAdapter updateStatementForModel:(MTLModel<MTLFMDBSerializing>*)self] : [MTLFMDBAdapter insertStatementForModel:(MTLModel<MTLFMDBSerializing>*)self];
+}
+
+- (NSString *)deleteStatement
+{
+    MTLModel<MTLFMDBSerializing> *object = (MTLModel<MTLFMDBSerializing> *)self;
+    return [NSString stringWithFormat:@"delete from %@ where mtlfmdb_rowid = :id",[object.class FMDBTableName]];
+}
+
+- (NSDictionary *)deleteParams
+{
+    return @{@"id" : @(self.mtlfmdb_rowid)};
+}
+
+@end
 
 @interface MTLFMDBAdapter ()
 
@@ -48,7 +101,8 @@ static NSString * const MTLFMDBAdapterThrownExceptionErrorKey = @"MTLFMDBAdapter
 	return nil;
 }
 
-- (id)initWithFMResultSet:(FMResultSet *)resultSet modelClass:(Class)modelClass error:(NSError **)error {
+- (id)initWithFMResultSet:(FMResultSet *)resultSet modelClass:(Class)modelClass error:(NSError **)error
+{
 	NSParameterAssert(modelClass != nil);
 	NSParameterAssert([modelClass isSubclassOfClass:MTLModel.class]);
 	NSParameterAssert([modelClass conformsToProtocol:@protocol(MTLFMDBSerializing)]);
@@ -63,27 +117,6 @@ static NSString * const MTLFMDBAdapterThrownExceptionErrorKey = @"MTLFMDBAdapter
 		}
 		return nil;
 	}
-    
-    /*
-	if ([modelClass respondsToSelector:@selector(classForParsingJSONDictionary:)]) {
-		modelClass = [modelClass classForParsingJSONDictionary:JSONDictionary];
-		if (modelClass == nil) {
-			if (error != NULL) {
-				NSDictionary *userInfo = @{
-                                           NSLocalizedDescriptionKey: NSLocalizedString(@"Could not parse JSON", @""),
-                                           NSLocalizedFailureReasonErrorKey: NSLocalizedString(@"No model class could be found to parse the JSON dictionary.", @"")
-                                           };
-                
-				*error = [NSError errorWithDomain:MTLJSONAdapterErrorDomain code:MTLJSONAdapterErrorNoClassFound userInfo:userInfo];
-			}
-            
-			return nil;
-		}
-        
-		NSAssert([modelClass isSubclassOfClass:MTLModel.class], @"Class %@ returned from +classForParsingJSONDictionary: is not a subclass of MTLModel", modelClass);
-		NSAssert([modelClass conformsToProtocol:@protocol(MTLJSONSerializing)], @"Class %@ returned from +classForParsingJSONDictionary: does not conform to <MTLJSONSerializing>", modelClass);
-	}
-    */
     
 	self = [super init];
 	if (self == nil) return nil;
@@ -271,51 +304,55 @@ static NSString * const MTLFMDBAdapterThrownExceptionErrorKey = @"MTLFMDBAdapter
 }
 
 + (NSArray *)primaryKeysValues:(MTLModel<MTLFMDBSerializing> *)model {
-    NSDictionary *dictionaryValue = model.dictionaryValue;
-    NSArray *keys = [model.class FMDBPrimaryKeys];
-    NSMutableArray *values = [NSMutableArray array];
-    for (NSString *key in keys) {
-        NSString *propertyKey = [self propertyKeyForModel:model column:key];
-        [values addObject:[dictionaryValue valueForKey:propertyKey]];
+    return @[@"rowid"];
+}
+
++ (NSString *)createStatementForModel:(Class)modelClass
+{
+    NSAssert([modelClass isSubclassOfClass:[MTLModel class]], @"parameter class is not a subclass of MTLModel");
+    NSAssert(![modelClass resolveClassMethod:@selector(FMDBColumnsByPropertyKey)], @"parameter class doesn't implement the FMDBColumnsByPropertyKey method");
+    
+    NSDictionary *columnsTypes = [MTLFMDBAdapter columnsTypeByPropertyKeyForModelClass:modelClass];
+    
+    NSMutableString *statement = [[NSMutableString alloc] initWithFormat:@"create table if not exists %@ (mtlfmdb_rowid integer primary key autoincrement",[modelClass FMDBTableName]];
+    
+    int count = 0;
+    NSArray *columnNames = [MTLFMDBAdapter columnsNamesForModelClass:modelClass];
+    
+    for (NSString *keyPath in columnNames)
+    {
+        if (keyPath != nil && ![keyPath isEqual:[NSNull null]])
+        {
+            //non devo mettere la virgola neanche se tutti i restanti valori dell'array sono uguali a nsnull
+            [statement appendFormat:@", %@ %@",keyPath, columnsTypes[keyPath]];
+        }
+        count++;
     }
     
-    return values;
+    [statement appendString:@")"];
+    
+    return statement;
 }
 
-+ (NSArray *)columnValues:(MTLModel<MTLFMDBSerializing> *)model {
-    NSDictionary *columns = [model.class FMDBColumnsByPropertyKey];
-	NSSet *propertyKeys = [model.class propertyKeys];
-    NSArray *Keys = [[propertyKeys allObjects] sortedArrayUsingSelector:@selector(compare:)];
-    NSDictionary *dictionaryValue = model.dictionaryValue;
-    NSMutableArray *values = [NSMutableArray array];
-    for (NSString *propertyKey in Keys)
-    {
-		NSString *keyPath = columns[propertyKey];
-        keyPath = keyPath ? : propertyKey;
-        
-        if (keyPath != nil && ![keyPath isEqual:[NSNull null]])
-        {
-            [values addObject:[dictionaryValue valueForKey:propertyKey]];
-        }
-    }
-    return values;
++ (NSString *)deleteStatementForModelClass:(Class)modelClass
+{
+    NSAssert([modelClass isSubclassOfClass:[MTLModel class]], @"parameter class is not a subclass of MTLModel");
+    NSAssert(![modelClass resolveClassMethod:@selector(FMDBColumnsByPropertyKey)], @"parameter class doesn't implement the FMDBColumnsByPropertyKey method");
+    return [NSString stringWithFormat:@"drop table if exists %@",[modelClass FMDBTableName]];;
 }
 
-+ (NSString *)insertStatementForModel:(MTLModel<MTLFMDBSerializing> *)model {
-    NSDictionary *columns = [model.class FMDBColumnsByPropertyKey];
-	NSSet *propertyKeys = [model.class propertyKeys];
-    NSArray *Keys = [[propertyKeys allObjects] sortedArrayUsingSelector:@selector(compare:)];
++ (NSString *)insertStatementForModel:(MTLModel<MTLFMDBSerializing> *)model
+{
     NSMutableArray *stats = [NSMutableArray array];
     NSMutableArray *qmarks = [NSMutableArray array];
-	for (NSString *propertyKey in Keys)
+    
+    NSArray *columnNames = [MTLFMDBAdapter columnsNamesForModelClass:model.class];
+    for (NSString *keyPath in columnNames)
     {
-		NSString *keyPath = columns[propertyKey];
-        keyPath = keyPath ? : propertyKey;
-        
-        if (keyPath != nil && ![keyPath isEqual:[NSNull null]])
+    	if (keyPath != nil && ![keyPath isEqual:[NSNull null]])
         {
             [stats addObject:keyPath];
-            [qmarks addObject:@"?"];
+            [qmarks addObject:[NSString stringWithFormat:@":%@",keyPath]];
         }
     }
     
@@ -324,17 +361,13 @@ static NSString * const MTLFMDBAdapterThrownExceptionErrorKey = @"MTLFMDBAdapter
     return statement;
 }
 
-+ (NSString *)updateStatementForModel:(MTLModel<MTLFMDBSerializing> *)model {
-    NSDictionary *columns = [model.class FMDBColumnsByPropertyKey];
-	NSSet *propertyKeys = [model.class propertyKeys];
-    NSArray *Keys = [[propertyKeys allObjects] sortedArrayUsingSelector:@selector(compare:)];
++ (NSString *)updateStatementForModel:(MTLModel<MTLFMDBSerializing> *)model
+{
     NSMutableArray *stats = [NSMutableArray array];
-	for (NSString *propertyKey in Keys) {
-		NSString *keyPath = columns[propertyKey];
-        keyPath = keyPath ? : propertyKey;
-        
+    NSArray *columnNames = [MTLFMDBAdapter columnsNamesForModelClass:model.class];
+	for (NSString *keyPath in columnNames) {
         if (keyPath != nil && ![keyPath isEqual:[NSNull null]]) {
-            NSString *s = [NSString stringWithFormat:@"%@ = ?", keyPath];
+            NSString *s = [NSString stringWithFormat:@"%@ = :%@", keyPath, keyPath];
             [stats addObject:s];
         }
     }
@@ -342,7 +375,8 @@ static NSString * const MTLFMDBAdapterThrownExceptionErrorKey = @"MTLFMDBAdapter
     return [NSString stringWithFormat:@"update %@ set %@ where %@", [model.class FMDBTableName], [stats componentsJoinedByString:@", "], [self whereStatementForModel:model]];
 }
 
-+ (NSString *)deleteStatementForModel:(MTLModel<MTLFMDBSerializing> *)model {
++ (NSString *)deleteStatementForModel:(MTLModel<MTLFMDBSerializing> *)model
+{
     NSParameterAssert([model.class conformsToProtocol:@protocol(MTLFMDBSerializing)]);
     
     return [NSString stringWithFormat:@"delete from %@ where %@", [model.class FMDBTableName], [self whereStatementForModel:model]];
@@ -350,14 +384,111 @@ static NSString * const MTLFMDBAdapterThrownExceptionErrorKey = @"MTLFMDBAdapter
 
 + (NSString *)whereStatementForModel:(MTLModel<MTLFMDBSerializing> *)model
 {
-    // Build the where statement
-    NSArray *keys = [model.class FMDBPrimaryKeys];
-    NSMutableArray *where = [NSMutableArray array];
-    for (NSString *key in keys) {
-        NSString *s = [NSString stringWithFormat:@"%@ = ?", key];
-        [where addObject:s];
+    return @"mtlfmdb_rowid = :mtlfmdb_rowid";
+}
+
++ (NSArray*) columnsNamesForModelClass:(Class)modelClass
+{
+    return [[MTLFMDBAdapter columnsNamesDictionaryForModelClass:modelClass] allValues];
+}
+
++ (NSDictionary*) columnsNamesDictionaryForModelClass:(Class)modelClass
+{
+    NSAssert([modelClass isSubclassOfClass:[MTLModel class]], @"parameter class is not a subclass of MTLModel");
+    NSAssert(![modelClass resolveClassMethod:@selector(FMDBColumnsByPropertyKey)], @"parameter class doesn't implement the FMDBColumnsByPropertyKey method");
+    
+    NSDictionary *columns = [modelClass FMDBColumnsByPropertyKey];
+    NSSet *propertyKeys = [modelClass propertyKeys];
+    NSArray *keys = [[propertyKeys allObjects] sortedArrayUsingSelector:@selector(compare:)];
+    NSMutableDictionary *columnsNamesDict = [[NSMutableDictionary alloc] initWithCapacity:keys.count];
+    
+    for (NSString *propertyKey in keys) {
+        NSString *keyPath = columns[propertyKey];
+        keyPath = keyPath ? : propertyKey;
+        [columnsNamesDict setObject:keyPath forKey:propertyKey];
     }
-    return [where componentsJoinedByString:@" AND "];
+    return [columnsNamesDict copy];
+}
+
++ (NSDictionary*) columnsTypeByPropertyKeyForModelClass:(Class)modelClass
+{
+    NSParameterAssert([modelClass conformsToProtocol:@protocol(MTLFMDBSerializing)]);
+ 
+    NSMutableDictionary *result = [[NSMutableDictionary alloc] init];
+    
+    //prendo tutti i campi della classe passata
+    [self enumeratePropertiesForClass:modelClass usingBlock:^(objc_property_t property, BOOL *stop) {
+        mtl_propertyAttributes *attributes = mtl_copyPropertyAttributes(property);
+        @onExit {
+            free(attributes);
+        };
+        
+        if (attributes->readonly && attributes->ivar == NULL) return;
+        NSString *key = @(property_getName(property));
+        
+        NSString *propertyType = @"";
+        if ([@(attributes->type) isEqualToString:@"i"]) {
+            propertyType = @"integer";
+        }else if ([@(attributes->type) isEqualToString:@"d"]) {
+            propertyType = @"double";
+        }else if ([@(attributes->type) isEqualToString:@"f"]) {
+            propertyType = @"real";
+        }else if ([@(attributes->type) isEqualToString:@"l"]) {
+            propertyType = @"bigint";
+        }else if ([@(attributes->type) isEqualToString:@"s"]) {
+            propertyType = @"smallint";
+        }else if ([@(attributes->type) isEqualToString:@"c"]) { //bool
+            propertyType = @"boolean";
+        }else{
+            if(attributes->objectClass == [NSString class]){
+                propertyType = @"text";
+            }else if(attributes->objectClass == [NSDate class]){
+                propertyType = @"int8";
+            }else if(attributes->objectClass == [NSData class]){
+                propertyType = @"blob";
+            }else if(attributes->objectClass == [NSArray class]){
+                //relazione uno a molti, non viene considerato
+            }else{
+                //se c'è un riferimento ad un altro oggetto che ha una tabella relativa inserisco un riferimento al suo id
+                if (attributes->objectClass && [attributes->objectClass conformsToProtocol:@protocol(MTLFMDBSerializing)]) {
+                    propertyType = @"int";
+                }else if([modelClass resolveClassMethod:@selector(FMDBColumnsTypeByPropertyKey)]){
+                    NSDictionary *columnTypes = [modelClass FMDBColumnsTypeByPropertyKey];
+                    if (columnTypes[key] != nil) {
+                        propertyType = columnTypes[key];
+                    }
+                }
+            }
+        }
+        result[key] = propertyType;
+    }];
+
+    return [result copy];
+}
+
+#pragma mark - Private methods
+
+
+//Metodo rubato ad MTLModel
++ (void)enumeratePropertiesForClass:(Class)class usingBlock:(void (^)(objc_property_t property, BOOL *stop))block {
+    BOOL stop = NO;
+    
+    while (!stop && ![class isEqual:MTLModel.class]) {
+        unsigned count = 0;
+        objc_property_t *properties = class_copyPropertyList(class, &count);
+        
+        class = class.superclass;
+        if (properties == NULL) continue;
+        
+        @onExit {
+            free(properties);
+        };
+        
+        for (unsigned i = 0; i < count; i++) {
+            block(properties[i], &stop);
+            if (stop) break;
+        }
+    }
 }
 
 

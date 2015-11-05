@@ -8,8 +8,41 @@
 
 #import <Foundation/Foundation.h>
 
+#define QUERY_PARAMS_KEY_QUERY  @"mtlfmdbadapter.queryparams.key.query"
+#define QUERY_PARAMS_KEY_ARGS   @"mtlfmdbadapter.queryparams.key.args"
+
 @class MTLModel;
 @class FMResultSet;
+@class FMDatabase;
+@protocol MTLFMDBSerializing;
+
+static const void *MTLFMDBRowIdKey = &MTLFMDBRowIdKey;
+
+@interface MTLModel (MTLFMDBExtensions)
+
+@property (nonatomic) NSInteger mtlfmdb_rowid;
+
+/** 
+ Recupera tutti gli oggetti dal DB passato come parametro e li restituisce in modo asincrono nel blocco di completamento insieme al db stesso per eventuali operazioni da eseguire nello stesso thread sullo stesso DB
+ */
++ (void) allObjectsFromDB:(FMDatabase *)db withCompletion:(void(^)(NSArray *objects, FMDatabase *db))completionBlock;
+
+/**
+ @result Statement per salvare l'oggetto sul DB
+ */
+- (NSString*) saveStatement;
+
+/**
+ @result Statement per eliminare l'oggetto dal DB
+ */
+- (NSString*) deleteStatement;
+
+/**
+ @result parametri per eliminare l'oggetto dal DB
+ */
+- (NSDictionary*) deleteParams;
+
+@end
 
 /**
  *  A MTLModel object that supports being parsed from and serialized to FMDB.
@@ -25,7 +58,8 @@
  `super`.
  
  Any property keys not present in the dictionary are assumed to match the column
- name that should be used. Any keys associated with NSNull will not participate
+ name that should be used. 
+ Any keys associated with NSNull will not participate
  in serialization.
 
  @return a dictionary mapping property keys to FMDB columns (as strings) or 
@@ -34,19 +68,27 @@
 + (NSDictionary *)FMDBColumnsByPropertyKey;
 
 /**
- Specify the primary keys used to identify this object in SQL queries
- 
- @return an NSArray of strings. Each string represents the name of a column to
- use as primary key.
- */
-+ (NSArray *)FMDBPrimaryKeys;
-
-/**
  Specify the table name for this object.
  
  @return an NSString with the name of the table.
  */
 + (NSString *)FMDBTableName;
+
+/*
+ Methods for load operation.
+ In this method you need to map all field to result set
+ */
+- (void) loadFromResultSet:(FMResultSet*)resultSet;
+
+/**
+ Methods for save operation.
+ In this method you need to map all field to result set
+ */
+- (void) saveAsync:(BOOL)async
+    withCompletion:(void(^)(BOOL result))completionBlock;
+
+
+- (NSDictionary*) saveParams;
 
 @optional
 
@@ -59,6 +101,11 @@
  @return the `NSValueTransformer` that should be used
  */
 - (NSValueTransformer *)FMDBTransformerForKey:(NSString *)key;
+
+/**
+ Metodo opzionale per restituire il tipo particolare legato ad una proprietà specifica
+ */
++ (NSDictionary *)FMDBColumnsTypeByPropertyKey;
 
 @end
 
@@ -132,13 +179,22 @@ extern const NSInteger MTLFMDBAdapterErrorInvalidFMResultSetMapping;
 - (NSString *)FMDBColumnForPropertyKey:(NSString *)key;
 
 /**
- Looks up the values of the properties described in FMDBColumnsByPropertyKey and returns them as an NSArray
+ Looks up the column names of the properties described in FMDBColumnsByPropertyKey and returns them as an NSArray
  
- @param model the MTLModel object whose values should be returned
+ @param modelClass the MTLModel class whose columns names should be returned
  
- @return an NSArray of values of the properties in the same order as described by FMDBColumnsByPropertyKey
+ @return an NSArray of columns names of the properties in the same order as described by FMDBColumnsByPropertyKey
  */
-+ (NSArray *)columnValues:(MTLModel<MTLFMDBSerializing> *)model;
++ (NSArray*) columnsNamesForModelClass:(Class)modelClass;
+
+/**
+ Looks up the column names of the properties described in FMDBColumnsByPropertyKey and returns them as an NSDictionary
+ 
+ @param modelClass the MTLModel class whose columns names should be returned
+ 
+ @return an NSDictionary with keys as property name and value of effective columns names of the properties
+ */
++ (NSDictionary*) columnsNamesDictionaryForModelClass:(Class)modelClass;
 
 /**
  Looks up the values of the primary keys.
@@ -149,6 +205,26 @@ extern const NSInteger MTLFMDBAdapterErrorInvalidFMResultSetMapping;
  */
 + (NSArray *)primaryKeysValues:(MTLModel<MTLFMDBSerializing> *)model;
 
+
+/**
+ The SQL CREATE TABLE statement for the object passed in `model`
+ 
+ @param model the MTLModel object we want to serialize to FMDB
+ 
+ @return an NSString with the CREATE TABLE statement to use with FMDB.
+ */
++ (NSString *)createStatementForModel:(Class)modelClass;
+
+/**
+ The SQL DELETE TABLE statement for the object passed in `model`
+ 
+ @param model the MTLModel object we want to serialize to FMDB
+ 
+ @return an NSString with the DELETE TABLE statement to use with FMDB.
+ */
++ (NSString *)deleteStatementForModelClass:(Class)modelClass;
+
+
 /**
  The SQL INSERT statement for the object passed in `model`
  
@@ -157,7 +233,6 @@ extern const NSInteger MTLFMDBAdapterErrorInvalidFMResultSetMapping;
  @return an NSString with the INSERT statement to use with FMDB.
  */
 + (NSString *)insertStatementForModel:(MTLModel<MTLFMDBSerializing> *)model;
-
 
 /**
  The SQL UPDATE statement for the object passed in `model`
