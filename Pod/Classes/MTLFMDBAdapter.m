@@ -8,8 +8,8 @@
 
 #import <objc/runtime.h>
 #import <Mantle/Mantle.h>
-#import <Mantle/MTLEXTRuntimeExtensions.h>
-#import <Mantle/MTLEXTScope.h>
+#import <Mantle/EXTRuntimeExtensions.h>
+#import <Mantle/EXTScope.h>
 #import <Mantle/MTLReflection.h>
 #import <FMDB/FMDB.h>
 #import "MTLFMDBAdapter.h"
